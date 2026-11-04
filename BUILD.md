@@ -8,6 +8,10 @@ Requirements
 To compile, you need a C and C++ compiler that is GNUC-compatible, such as GCC, LLVM/Clang, or ICC.
 It is recommended to use GCC 7.1+ or Clang 6.0+. You can find GCC at http://gcc.gnu.org.
 
+The link command with all codecs is longer than Windows allows (32,767 characters), so the objects go to the
+linker in a file, `lzbench.objs` (`@lzbench.objs`). GNU make 4.0 or later (e.g. `mingw32-make` on Windows) writes
+it with `$(file)`; GNU make 3.81 (MSYS, macOS) has no `$(file)`, and its `sh` writes it with `printf`.
+
 
 Testing
 ------------
@@ -84,6 +88,31 @@ of problems, particular compressor can be excluded from build by setting
 
 	make DONT_BUILD_GLZA=1
 
+To build only some compressors, name them in `BUILD_ONLY`, for example:
+
+	make BUILD_ONLY="ZSTD LZ4"
+
+The names are those of the `CODECS +=` lines in `mk/*.mk`. A compressor that
+calls another one (aceapex calls zstd, openzl calls zstd and lz4) is linked with
+its objects, but only the compressors named are benchmarked. A compressor that
+is disabled by default or on the platform (as AOCL, see below) stays disabled.
+
+
+AOCL-Compression is disabled by default. Enable its `aocl-` codecs with:
+
+	make DONT_BUILD_AOCL=0
+
+AOCL-Compression is supported only for x86-64 Linux builds and
+requires GNU binutils (`nm` and `objcopy`). If these requirements are not met,
+AOCL codecs are skipped and the rest of lzbench is built normally.
+
+Enabling AOCL also enlarges the output buffer of every codec, not only the
+`aocl-` ones: AOCL's LZMA does not check the output size and needs
+`n + n/6 + 16 KB` for an `n`-byte chunk, so the bound becomes `n + n/6` plus a
+16 KB pad per chunk instead of `n + n/8` plus 1 KB. With small blocks (`-b`)
+this takes much more memory, and a codec that only just fits on incompressible
+data may then pass where a default build reports an error.
+
 
 CUDA support
 -------------------------
@@ -117,7 +146,7 @@ Compilation for various CPU architectures
 
 Known issues
 ------------
-With all issues refer to `Makefile`, as they may already be suppressed.
+With all issues refer to `Makefile` and the codec's `mk/<codec>.mk`, as they may already be suppressed.
 
 ### All operating systems
 - LZSSE requires 64-bit Intel CPU with SSE4.1 for compilation and execution (a support for `__SSE4_1__` is auto-detected)

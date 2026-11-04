@@ -36,7 +36,7 @@ jobs:
         imageName: 'macOS-14'
         SELECTED_CC: clang
         SELECTED_CXX: clang++
-        ARTIFACT_SLUG: clang-arm64-macos
+        ARTIFACT_SLUG: clang-x86_64-macos
 
       # clang-6 and newer compilers
       clang-22 [Ubuntu 24.04 Noble]:
@@ -47,6 +47,9 @@ jobs:
         SELECTED_CXX: clang++-22
         PACKAGES: 'clang-22 llvm-22-dev libomp-22-dev'
         ARTIFACT_SLUG: clang-22-x86_64
+        # AOCL is opt-in; one gcc and one clang job build and run it
+        MORE_OPTIONS: 'DONT_BUILD_AOCL=0'
+        REQUIRE_CODECS: 'aocl-zstd'
 
       clang-21 [Ubuntu 24.04 Noble]:
         imageName: 'ubuntu-24.04'
@@ -73,6 +76,11 @@ jobs:
         SELECTED_CC: clang-19
         SELECTED_CXX: clang++-19
         PACKAGES: 'clang-19 llvm-19-dev libomp-19-dev'
+        # clang 19 spends hours in "X86 DAG->DAG Instruction Selection" on
+        # partitionFull() in OpenZL's AVX-512 PivCo-Huffman encoder and then dies
+        # with "LLVM ERROR: out of memory". It happens at every -O level except -O0,
+        # and only with clang 19 -- clang 16/18/20/21/22 and gcc are all fine.
+        MORE_OPTIONS: 'DONT_BUILD_OPENZL=1'
         ARTIFACT_SLUG: clang-19-x86_64
 
       clang-18 [Ubuntu 24.04 Noble]:
@@ -160,6 +168,9 @@ jobs:
         SELECTED_CXX: g++-14
         PACKAGES: 'g++-14'
         ARTIFACT_SLUG: gcc-14-x86_64
+        # AOCL is opt-in; one gcc and one clang job build and run it
+        MORE_OPTIONS: 'DONT_BUILD_AOCL=0'
+        REQUIRE_CODECS: 'aocl-zstd'
 
       gcc-14 x86 32-bit [Ubuntu 24.04 Noble]:
         imageName: 'ubuntu-24.04'
@@ -168,6 +179,22 @@ jobs:
         PACKAGES: 'g++-14 g++-14-multilib gcc-multilib'
         MORE_OPTIONS: 'BUILD_ARCH=32-bit'
         ARTIFACT_SLUG: gcc-14-i686
+
+      # The only native static build: the cross builds below are static too,
+      # but they skip the cargo (density, mbrotli, mzstd, pulsar) and zig (skim)
+      # codecs, so without this job nothing links the Rust staticlib into a
+      # -static binary. Two Rust staticlibs each carry their own copy of std
+      # and fail to link together ("multiple definition of
+      # rust_eh_personality"), which is why every Rust codec is built into the
+      # one library from misc/rust-codecs.
+      gcc-14 x86 64-bit static [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: gcc-14
+        SELECTED_CXX: g++-14
+        PACKAGES: 'g++-14'
+        MORE_OPTIONS: 'BUILD_STATIC=1'
+        REQUIRE_CODECS: 'density gobrrr mbrotli mzstd pulsar skim'
+        ARTIFACT_SLUG: gcc-14-x86_64-static
 
       gcc-13 [Ubuntu 24.04 Noble]:
         imageName: 'ubuntu-24.04'
@@ -231,6 +258,17 @@ jobs:
         QEMU_INTERPRETER: 'qemu-ppc64le-static -L /usr/powerpc64le-linux-gnu'
         ARTIFACT_SLUG: powerpc64le-linux-gnu-gcc
 
+      # The only big-endian target. The Makefile leaves out the codecs that
+      # assume a little-endian CPU (aceapex, bsc, lzfse/lzvn, memlz, openzl).
+      gcc IBM Z 64-bit Big-endian (s390x) [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: s390x-linux-gnu-gcc
+        SELECTED_CXX: s390x-linux-gnu-g++
+        PACKAGES: 'qemu-user-static gcc-s390x-linux-gnu g++-s390x-linux-gnu'
+        MORE_OPTIONS: 'BUILD_STATIC=1'
+        QEMU_INTERPRETER: 'qemu-s390x-static -L /usr/s390x-linux-gnu'
+        ARTIFACT_SLUG: s390x-linux-gnu-gcc
+
 
   steps:
   - script: |
@@ -269,8 +307,14 @@ jobs:
         fi
       else
          REAL_COMPILER_VER=`$SELECTED_CC --version | grep -o "clang version.*" | awk '{print $3}'`
-         brew update
-         brew install ccache libomp
+         # Homebrew no longer builds bottles for Intel macOS (Tier 3), so "brew install
+         # ccache" builds ccache, LLVM and Rust from source and runs out of time. Use
+         # ccache's own universal binary instead. libomp is not needed: Apple clang
+         # doesn't accept -fopenmp, so bsc is built without OpenMP either way.
+         CCACHE_VER=4.14.1
+         curl -fsSL https://github.com/ccache/ccache/releases/download/v$CCACHE_VER/ccache-$CCACHE_VER-darwin.tar.gz | tar xz || exit 1
+         sudo install ccache-$CCACHE_VER-darwin/ccache /usr/local/bin/ || exit 1
+         rm -rf ccache-$CCACHE_VER-darwin
       fi
 
       UPDATE_TIME=$SECONDS
@@ -280,6 +324,7 @@ jobs:
       echo "##vso[task.setvariable variable=UPDATE_TIME]$UPDATE_TIME"
 
     displayName: '*** Install Build Dependencies'
+    timeoutInMinutes: 20
 
   - task: Cache@2
     continueOnError: true
@@ -316,7 +361,7 @@ jobs:
   # compiled and round-trip tested. Linux native builds only: a native x86_64
   # libskim.a cannot be linked into the cross-compiled (QEMU) or 32-bit targets,
   # and the macOS job is skipped on purpose; those keep skim disabled via the
-  # Makefile's 'command -v zig' auto-detection.
+  # 'command -v zig' auto-detection in mk/skim.mk.
   - script: |
       sudo snap install zig --classic --channel=latest/beta
       echo "##vso[task.prependpath]/snap/bin"
@@ -324,16 +369,31 @@ jobs:
     displayName: '*** Install Zig (for skim; Linux native builds only)'
     condition: and(succeeded(), eq(variables['Agent.OS'], 'Linux'), eq(variables['QEMU_INTERPRETER'], ''), not(contains(variables['MORE_OPTIONS'], '32-bit')))
 
+  # Pin Go for native Linux go-brrr builds and round-trip tests.
+  - task: GoTool@0
+    inputs:
+      version: '1.27.1'
+    displayName: '*** Install Go (for gobrrr; Linux native builds only)'
+    condition: and(succeeded(), eq(variables['Agent.OS'], 'Linux'), eq(variables['QEMU_INTERPRETER'], ''), not(contains(variables['MORE_OPTIONS'], '32-bit')))
+
   - script: |
       echo SELECTED_CC=$SELECTED_CC SELECTED_CXX=$SELECTED_CXX REAL_COMPILER_VER=$REAL_COMPILER_VER imageName=$(imageName) OS_NAME=$OS_NAME
       df -Th
       command -v zig && zig version || echo "zig not installed - skim disabled"
+      command -v go && go version || echo "go not installed - gobrrr disabled"
 
       make -j2 CC="ccache $SELECTED_CC" CXX="ccache $SELECTED_CXX" $MORE_OPTIONS || exit 1
       ccache --show-stats
       echo -------------------------------------
       file ./lzbench
       $QEMU_INTERPRETER ./lzbench
+
+      # The Makefile silently drops codecs whose toolchain (cargo, zig) it cannot
+      # find, which would leave a job green without testing what it is meant to.
+      for codec in $REQUIRE_CODECS; do
+        $QEMU_INTERPRETER ./lzbench -l | grep -q "^$codec = " || \
+          { echo "ERROR: $codec was not built, but this job requires it"; exit 1; }
+      done
 
       df -Th
       BUILD_TIME=$SECONDS
@@ -347,19 +407,61 @@ jobs:
     displayName: 'Publish lzbench'
     inputs:
       targetPath: '$(Build.SourcesDirectory)/lzbench'
-      artifactName: 'lzbench-$(ARTIFACT_SLUG)'
+      # names must be unique per build; the attempt number lets "Rerun failed jobs" publish again
+      artifactName: 'lzbench-$(ARTIFACT_SLUG)-$(System.JobAttempt)'
 
   - script: |
       $QEMU_INTERPRETER ./lzbench -eLZ -v5 ./lzbench || exit 1
     displayName: '*** Run LZ'
 
   - script: |
+      $QEMU_INTERPRETER ./lzbench -eLZ+ENTROPY -v5 ./lzbench || exit 1
+    displayName: '*** Run LZ+ENTROPY'
+
+  - script: |
       $QEMU_INTERPRETER ./lzbench -eSYMMETRIC -v5 ./lzbench || exit 1
     displayName: '*** Run SYMMETRIC'
 
   - script: |
-      $QEMU_INTERPRETER ./lzbench -eMISC -v5 ./lzbench || exit 1
-    displayName: '*** Run MISC'
+      $QEMU_INTERPRETER ./lzbench -eAOCL -v5 ./lzbench || exit 1
+    displayName: '*** Run AOCL'
+    condition: and(succeeded(), contains(variables['MORE_OPTIONS'], 'DONT_BUILD_AOCL=0'))
+
+  # Every built codec at its first level, on data it cannot compress. The codec
+  # list comes from 'lzbench -l', so this also covers codecs that are missing
+  # from the LZ/LZ+ENTROPY/SYMMETRIC/FASTEST aliases used above. A compressor must
+  # store such input rather than fail: lzbench exits with 10 when compress()
+  # returns <= 0 and with 11 when the round trip does not match.
+  - script: |
+      set -e
+      DATA_DIR=$(Agent.TempDirectory)/incompressible
+      mkdir -p $DATA_DIR
+      python3 -c "import random,sys; random.seed(1); sys.stdout.buffer.write(random.randbytes(262144))" > $DATA_DIR/random-256K
+      python3 -c "import random,sys; random.seed(2); sys.stdout.buffer.write(random.randbytes(100))" > $DATA_DIR/random-100
+      printf 'hello' > $DATA_DIR/tiny-5
+      printf 'x' > $DATA_DIR/tiny-1
+
+      # BUGGY and SLOW aliases are skipped, as is tornado (see FASTEST). The
+      # openzl integer profiles fail when the input size is not a multiple of
+      # the element width.
+      SKIP="$($QEMU_INTERPRETER ./lzbench -l | sed -nE 's/^(BUGGY|SLOW) = //p' | tr '/\n' '  ')"
+      SKIP="$SKIP tornado openzl_le_u16 openzl_le_i16 openzl_le_u32 openzl_le_i32 openzl_le_u64 openzl_le_i64"
+      CODECS=$($QEMU_INTERPRETER ./lzbench -l | awk -v skip=" $SKIP memcpy " '
+        /^Available compressors/ { f = 1; next }
+        /^$/ { f = 0 }
+        f && / = / {
+          n = $1
+          if (index(skip, " " n " ")) next
+          if (match($0, /levels=\[-?[0-9]+/)) n = n "," substr($0, RSTART + 8, RLENGTH - 8)
+          printf "%s%s", sep, n; sep = "/"
+        }')
+      echo "CODECS=$CODECS"
+
+      for f in $DATA_DIR/*; do
+        $QEMU_INTERPRETER ./lzbench -e"$CODECS" -t0,0 -i1,1 -v5 $f
+      done
+      rm -rf $DATA_DIR
+    displayName: '*** Run all codecs on incompressible and tiny inputs'
 
   - script: |
       $QEMU_INTERPRETER ./lzbench -eFASTEST -t0,0 -T2 -jr . || exit 1
@@ -461,7 +563,8 @@ jobs:
     displayName: 'Publish lzbench'
     inputs:
       targetPath: '$(Build.SourcesDirectory)/lzbench'
-      artifactName: 'lzbench-$(ARTIFACT_SLUG)'
+      # names must be unique per build; the attempt number lets "Rerun failed jobs" publish again
+      artifactName: 'lzbench-$(ARTIFACT_SLUG)-$(System.JobAttempt)'
 
   # No GPU on this agent, so every CUDA codec has to fail its init() and be
   # skipped. This is the regression test for the SEGFAULT that used to happen
@@ -477,12 +580,12 @@ jobs:
     displayName: '*** Run LZ'
 
   - script: |
-      ./lzbench -eSYMMETRIC -v5 ./lzbench || exit 1
-    displayName: '*** Run SYMMETRIC'
+      ./lzbench -eLZ+ENTROPY -v5 ./lzbench || exit 1
+    displayName: '*** Run LZ+ENTROPY'
 
   - script: |
-      ./lzbench -eMISC -v5 ./lzbench || exit 1
-    displayName: '*** Run MISC'
+      ./lzbench -eSYMMETRIC -v5 ./lzbench || exit 1
+    displayName: '*** Run SYMMETRIC'
 
   - script: |
       ./lzbench -eFASTEST -t0,0 -T2 -jr . || exit 1
@@ -553,19 +656,20 @@ jobs:
     displayName: 'Publish lzbench.exe'
     inputs:
       targetPath: '$(Build.SourcesDirectory)\lzbench.exe'
-      artifactName: 'lzbench-$(ARTIFACT_SLUG)'
+      # names must be unique per build; the attempt number lets "Rerun failed jobs" publish again
+      artifactName: 'lzbench-$(ARTIFACT_SLUG)-$(System.JobAttempt)'
 
   - script: |
       lzbench.exe -eLZ -v5 lzbench.exe || exit 1
     displayName: 'Run LZ for $(arch) architecture'
 
   - script: |
-      lzbench.exe -eSYMMETRIC -v5 lzbench.exe || exit 1
-    displayName: 'Run SYMMETRIC for $(arch) architecture'
+      lzbench.exe -eLZ+ENTROPY -v5 lzbench.exe || exit 1
+    displayName: 'Run LZ+ENTROPY for $(arch) architecture'
 
   - script: |
-      lzbench.exe -eMISC -v5 lzbench.exe || exit 1
-    displayName: 'Run MISC for $(arch) architecture'
+      lzbench.exe -eSYMMETRIC -v5 lzbench.exe || exit 1
+    displayName: 'Run SYMMETRIC for $(arch) architecture'
 
   - script: |
       lzbench.exe -eFASTEST -t0,0 -T2 -jr . || exit 1

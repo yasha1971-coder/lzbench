@@ -15,8 +15,8 @@
 
 // has to be compiled separated because of collisions with LZMA's 7zTypes.h
 #ifndef BENCH_REMOVE_CSC
-#include "lz/libcsc/csc_enc.h"
-#include "lz/libcsc/csc_dec.h"
+#include "lz+entropy/libcsc/csc_enc.h"
+#include "lz+entropy/libcsc/csc_dec.h"
 #include <string.h> // memcpy
 
 struct MemSeqStream
@@ -113,7 +113,7 @@ int64_t lzbench_csc_decompress(char *inbuf, size_t insize, char *outbuf, size_t 
 
 
 #ifndef BENCH_REMOVE_GIPFELI
-#include "lz/gipfeli/gipfeli.h"
+#include "lz+entropy/gipfeli/gipfeli.h"
 
 int64_t lzbench_gipfeli_compress(char *inbuf, size_t insize, char *outbuf, size_t outsize, codec_options_t *codec_options)
 {
@@ -145,7 +145,7 @@ int64_t lzbench_gipfeli_decompress(char *inbuf, size_t insize, char *outbuf, siz
     return res;
 }
 
-#endif
+#endif // BENCH_REMOVE_GIPFELI
 
 
 
@@ -168,7 +168,7 @@ int64_t lzbench_lzmat_decompress(char *inbuf, size_t insize, char *outbuf, size_
     return decomplen;
 }
 
-#endif
+#endif // BENCH_REMOVE_LZMAT
 
 
 
@@ -228,7 +228,7 @@ int64_t lzbench_lzrw_decompress(char *inbuf, size_t insize, char *outbuf, size_t
     return decomplen;
 }
 
-#endif
+#endif // BENCH_REMOVE_LZRW
 
 
 
@@ -266,7 +266,7 @@ int64_t lzbench_wflz_decompress(char *inbuf, size_t insize, char *outbuf, size_t
     return outsize;
 }
 
-#endif
+#endif // BENCH_REMOVE_WFLZ
 
 
 
@@ -295,31 +295,4 @@ int64_t lzbench_yappy_decompress(char *inbuf, size_t insize, char *outbuf, size_
     return YappyUnCompress((uint8_t*)inbuf, (uint8_t*)inbuf+insize, (uint8_t*)outbuf) - (uint8_t*)outbuf;
 }
 
-#endif
-
-
-
-#ifndef BENCH_REMOVE_YALZ77
-#include "lz/yalz77/lz77.h"
-
-int64_t lzbench_yalz77_compress(char *inbuf, size_t insize, char *outbuf, size_t outsize, codec_options_t *codec_options)
-{
-    lz77::compress_t compress(codec_options->level, lz77::DEFAULT_BLOCKSIZE);
-    std::string compressed = compress.feed((unsigned char*)inbuf, (unsigned char*)inbuf+insize);
-    if (compressed.size() > outsize) return 0;
-    memcpy(outbuf, compressed.c_str(), compressed.size());
-    return compressed.size();
-}
-
-int64_t lzbench_yalz77_decompress(char *inbuf, size_t insize, char *outbuf, size_t outsize, codec_options_t *codec_options)
-{
-    lz77::decompress_t decompress;
-    std::string temp;
-    decompress.feed((unsigned char*)inbuf, (unsigned char*)inbuf+insize, temp);
-    const std::string& decompressed = decompress.result();
-    if (decompressed.size() > outsize) return 0;
-    memcpy(outbuf, decompressed.c_str(), decompressed.size());
-    return decompressed.size();
-}
-
-#endif
+#endif // BENCH_REMOVE_YAPPY

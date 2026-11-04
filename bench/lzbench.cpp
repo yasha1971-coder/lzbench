@@ -1056,7 +1056,11 @@ void usage(lzbench_params_t* params)
 void show_version()
 {
     fprintf(stdout,
-            "" PROGNAME " " PROGVERSION "\n"
+            "" PROGNAME " " PROGVERSION
+#ifdef LZBENCH_GIT_COMMIT
+            " (commit " LZBENCH_GIT_COMMIT ")"
+#endif
+            "\n"
             "Copyright (C) 2011-2025 Przemyslaw Skibinski\n"
             "License GPL v2 or v3: GNU GPL version 2 or 3 <http://gnu.org/licenses/gpl.html>\n"
             "This is free software: you are free to change and redistribute it.\n"
@@ -1157,7 +1161,7 @@ int main( int argc, char** argv)
         switch (argument[0])
         {
         case 'b':
-            params->chunk_size = number << 10;
+            params->chunk_size = (size_t)number << 10;
             break;
         case 'c':
             sort_col = number;
@@ -1180,7 +1184,7 @@ int main( int argc, char** argv)
             join = true;
             break;
         case 'm':
-            params->mem_limit = number << 18; /*  total memory usage = mem_limit * 4  */
+            params->mem_limit = (size_t)number << 18; /*  total memory usage = mem_limit * 4  */
             if (params->textformat == TEXT) params->textformat = TEXT_FULL;
             break;
         case 'o':
@@ -1272,7 +1276,19 @@ int main( int argc, char** argv)
                         ;//printf("threading=-T");
                     else
                         printf("; threading=none");
-                    printf("\n");
+
+                    // algorithm, per level range for the codecs in algorithm_by_level
+                    std::string per_level;
+                    for (size_t j = 0; j < sizeof(algorithm_by_level)/sizeof(algorithm_by_level[0]); j++)
+                    {
+                        const algorithm_desc_t& a = algorithm_by_level[j];
+                        if (strcmp(a.name, comp_desc[i].name) != 0) continue;
+                        char range[32];
+                        if (a.first_level == a.last_level) snprintf(range, sizeof(range), "%d", a.first_level);
+                        else snprintf(range, sizeof(range), "%d-%d", a.first_level, a.last_level);
+                        per_level += std::string(per_level.empty() ? "" : ", ") + range + ": " + a.algorithm;
+                    }
+                    printf("; algorithm=%s\n", per_level.empty() ? comp_desc[i].algorithm : per_level.c_str());
                 }
             }
 

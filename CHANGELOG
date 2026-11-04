@@ -1,13 +1,111 @@
 v2.x.y (work-in-progress)
+- added AOCL-Compression 5.3.2 (AMD optimized lz4/lz4hc/lzma/bzip2/snappy/zlib/zstd, prefixed aocl-)
+- added go-brrr 1.3.0 (by @molecule-man)
+- added mzstd 0.2.5 (mzstd, mzstd_fast; Zstandard in safe Rust, by @Mnwa)
+- added wlz4 1.3.0 (wlz4, wlz4fast, wlz4hc) and wzip 1.3.0 (by @icodywu)
+- added zlib-turbo 1.1.0 (by @icodywu)
+- updated aceapex to 2.6.1 (thanks to @yasha1971-coder); adds aceapex_fast (levels 1-8): the FAST profile, LZ77 without an entropy stage
+- updated kanzi to 2.6.0 (by @flanglet)
+- updated lzav to 5.20 (thanks to @avaneev)
+- updated mbrotli to 0.5.15 (by @Mnwa)
+- updated slz to 1.4-dev3 (by @wtarreau)
+- updated zxc to 0.15.0 (thanks to @hellobertrand)
+- improvement: the Makefile describes each codec in its own mk/<codec>.mk (objects, flags,
+               platform checks) instead of spreading it over the 1,400-line Makefile;
+               CONTRIBUTING.md shows the mk file for a new codec
+- improvement: out-of-tree builds: "make -f /path/to/lzbench/Makefile" builds in the current
+               directory
+- improvement: cross builds (e.g. MinGW from Linux, ARM, PowerPC) no longer need DONT_BUILD_*
+               options: skim and the Rust codecs are skipped automatically
+- improvement: DONT_BUILD_LZAV=1 and DONT_BUILD_YALZ77=1 work like the other DONT_BUILD_* options
+- improvement: "lzbench -V" shows the git commit it was built from, with "-dirty" for local changes
+- improvement: gpucompact moved from lz/ to bwt/, as it is BWT-based (BWT + RLE + tANS)
+- improvement: lz/ is split in two: lz/ keeps the LZ codecs without an entropy coder (21), and
+               lz+entropy/ has those with Huffman, FSE/ANS or range coding (20); their benchmark
+               wrappers are split the same way, into bench/lz_codecs.cpp and bench/lz_entropy_codecs.cpp
+- improvement: aliases follow the same split: LZ has the LZ codecs (or levels) without an entropy
+               coder, the new LZ+ENTROPY those with one, and ALL is LZ/LZ+ENTROPY/SYMMETRIC; the MISC
+               alias is gone: crush, lzjb, tamp, tornado and zling moved to LZ or LZ+ENTROPY, skim to
+               SYMMETRIC, and zpaq -1 (LZ77 without a model) to LZ
+- improvement: FAST, the default alias, lists the levels that compress at 100 MB/s or more on the
+               EPYC 9555P (77 instead of 39)
+- improvement: OPT lists only levels that use optimal parsing, and adds brieflz, libdeflate, lizard
+               and lz4hc
+- improvement: "lzbench -l" shows each codec's algorithm (modelling stage + entropy coder, e.g.
+               "LZ77 + Huffman", "ROLZ + ANS", "BWT + CM"), per level for kanzi, lizard, tornado and zpaq
+- improvement: doc/results: an interactive results page (sortable table, ratio vs. speed charts with
+               the Pareto frontier) published to GitHub Pages, and lzbench_json.py to make its data
+               from lzbench's -o1 or -o4 output; README.md shows a chart made by lzbench_svg.py
+               that links to it
+- improvement: slz now uses its own decompressor, no longer zlib's
+- improvement: the FAST and FASTEST aliases use slz_deflate instead of slz_gzip; LZ+ENTROPY has both
+- improvement: release builds use -U_FORTIFY_SOURCE, so the results no longer depend on the
+               distribution's hardening defaults: e.g. Ubuntu's gcc 12+ defines _FORTIFY_SOURCE=3,
+               which made lzav -2 about 30% slower (#360); MOREFLAGS="-D_FORTIFY_SOURCE=3" restores it
+- fix: "make ENABLE_CUDA=1" failed to parse with GNU make 3.81, the version on macOS
+- fix: the C++ sources of csc, gipfeli, lzham and yappy were compiled with USER_CFLAGS instead of
+       USER_CXXFLAGS
+- fix: lzo1f was shown as "lzof" in the results (since 2.3)
+- fix: tornado -1, which expands incompressible data by up to 25%, overflowed the output buffer
+       (12.5% extra) and wrote a truncated stream that failed to decompress, e.g. with -b4096 on
+       silesia.tar; it now reports a compression error
+- fix: the openzl integer profiles (le-u16 to le-i64) failed with "Stream parameter invalid" on
+       inputs whose size is not a multiple of the element width (#339); the 1-7 trailing bytes
+       are now stored uncompressed after the OpenZL frame
+- fix: slz_gzip measured the zlib format and slz_zlib the gzip format, since slz was added
+
+v2.4 (Sep 27, 2026)
+- added GPUCompact 1.1 (by @UDPSendToFailed)
+- added lbzip2 2.6.5 (thanks to @caius72)
+- added mbrotli 0.5.2 (by @Mnwa)
+- added misa77 0.6.0 (by @welcome-to-the-sunny-side)
+- added OpenZL v0.2.3 (thanks to @fwyzard)
+- added pulsar 2.5.0 (thanks to @ceedot-rock)
+- updated aceapex to 1.0.1 (thanks to @yasha1971-coder)
+- updated bzip3 to 1.5.4
+- updated libdeflate to v1.26
+- updated lzav to 5.17 (thanks to @avaneev)
+- updated lzham to upstream master as of 2020-09-15 (public-domain licence)
+- updated lzma to 26.03
+- updated memlz to 0.5 beta (thanks to @rrrlasse); fixes unaligned accesses, re-enabled on 32-bit ARM
+- updated nvcomp to support CUDA 13 and cccl 3 (thanks to @fwyzard)
+- updated ppmd8 to 26.03
+- updated slz to 1.3.1
+- updated snappy to 1.3.1; fixes a uint32_t overflow on malformed input, faster on RISC-V
+- updated tamp to 2.3.0
+- updated xz to 5.8.4; fixes an invalid memory access in liblzma decoders after a failed allocation
+- updated zxc to 0.14.1 (thanks to @hellobertrand)
+- improvement: autodetect whether linking with -ldl is required (thanks to @fwyzard)
+- improvement: added a CUDA build job (nvcc 13.2, Ubuntu 24.04) to the Azure Pipelines CI
+- improvement: the Rust codecs (density, mbrotli, pulsar) are built into a single library from
+               misc/rust-codecs, so a BUILD_STATIC=1 binary can link more than one of them
+- improvement: the crates.io dependencies of the Rust codecs are vendored in
+               misc/rust-codecs/vendor, so they build without network access
+- improvement: "make" no longer reruns cargo and recompiles bench/lzbench.o every time;
+               the Rust library is rebuilt only when its sources or the set of Rust codecs change
+- improvement: tornado is now benchmarked on RISC-V hardware whose misaligned scalar access
+               is fast (detected with the hwprobe syscall), instead of being disabled outright
+               (thanks to @zqb-all)
+- improvement: the Makefile now generates header dependencies (-MMD -MP), so editing a header
+               or a .cpp that another .cpp #includes (aceapex, lzo, ucl, tamp, 7-zip) rebuilds the
+               affected objects instead of relinking stale ones
+- improvement: CI now runs every codec on incompressible and tiny inputs, and has a native
+               static build job that links the Rust (density, mbrotli, pulsar) and Zig (skim)
+               codecs
+- improvement: RUST_TARGET_CPU sets the CPU the Rust codecs are compiled for (default: native);
+               the release binaries use x86-64, as a native build contains e.g. AVX-512 code and
+               dies with SIGILL on CPUs without it
 - fix: codecs whose init() fails are now skipped instead of being benchmarked with a
        NULL work_mem, which used to SEGFAULT (e.g. "lzbench -eCUDA" without a GPU)
-- added misa77 0.6.0 (by @welcome-to-the-sunny-side)
-- added OpenZL v0.2.0 (thanks to @fwyzard)
-- added a CUDA build job (nvcc 13.2, Ubuntu 24.04) to the Azure Pipelines CI
-- updated aceapex to 1.0.1 (thanks to @yasha1971-coder)
-- updated lzav to 5.16 (thanks to @avaneev)
-- updated nvcomp to support CUDA 13 and cccl 3 (thanks to @fwyzard)
-- updated zxc to 0.13.2 (thanks to @hellobertrand)
+- fix: libdeflate leaked a decompressor on every decompression call (thanks to @wu-zhao-min)
+- fix: aceapex corrupted inputs smaller than 768 bytes (thanks to @yasha1971-coder)
+- fix: memory and file handle leaks when an input file cannot be read, or when a memory
+       allocation fails (thanks to @wu-zhao-min)
+- fix: density was enabled with Cargo 1.82-1.84, which cannot build its edition 2024 crate,
+       so the build failed; it is now skipped below 1.85
+- fix: aceapex double-free on empty compression streams (thanks to @zqb-all)
+- fix: changing the set of codecs (e.g. DONT_BUILD_MBROTLI=1) left stale bench objects
+       that failed to link; they are now rebuilt
 
 v2.3 (Jun 15, 2026)
 - improvement: Reorganized compressor alias groups by type — ALL is now a composite of LZ /

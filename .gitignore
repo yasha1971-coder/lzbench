@@ -2,10 +2,16 @@
 _codelite/
 _visual/
 .vscode/
+.idea
 
-# Rust-based Density
+# Rust codecs (built through misc/rust-codecs)
+misc/rust-codecs/target/
 misc/density/src/target/
 misc/density/src/Cargo.lock
+
+# go-brrr build outputs
+lz+entropy/gobrrr/libgobrrr.h
+lz+entropy/gobrrr/libgobrrr.config
 
 # Archives
 *.zip
@@ -13,6 +19,16 @@ misc/density/src/Cargo.lock
 # Object files
 *.o
 *.ko
+
+# Compiler-generated header dependencies (make DEPFLAGS)
+*.d
+
+# Set of BENCH_REMOVE_* defines the bench/*.o were built with (Makefile)
+bench/codecs.stamp
+bench/git-commit.stamp
+
+# The objects of the link (Makefile)
+lzbench.objs
 
 # Libraries
 *.lib
