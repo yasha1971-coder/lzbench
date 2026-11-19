@@ -27,6 +27,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
+#ifdef _WIN32
+#include <process.h>
+#endif
 #ifndef MAP_HUGE_2MB
 #define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
 #endif
@@ -38,8 +41,8 @@
 #include <algorithm>
 #include <zstd.h>
 #define XXH_STATIC_LINKING_ONLY
-#ifndef ACEAPEX_NO_XXH
-#define XXH_IMPLEMENTATION
+#if !defined(ACEAPEX_NO_XXH) && !defined(XXH_INLINE_ALL)
+#define XXH_INLINE_ALL      // xxHash private to aceapex (static): no global XXH* to clash with a host's copy (lzbench #366)
 #endif
 #include "xxhash.h"
 #define OUR_CHECKSUM(buf,sz) XXH3_64bits(buf,sz)
@@ -56,17 +59,18 @@
 // wrong bytes on 22). A thread started inside a call inherits its caller's state through ax_thread.
 static thread_local size_t g_block_size = BLOCK_SIZE; // runtime adaptive, set in encode_file
 extern thread_local int g_input_is_dna;
+extern thread_local int g_enc_level;
 static thread_local std::atomic<int> t_dec_err_own{0};
 static thread_local std::atomic<int>* t_dec_err = nullptr;
 static inline std::atomic<int>& ax_dec_err(){ return t_dec_err ? *t_dec_err : t_dec_err_own; }
 #define g_dec_err (ax_dec_err())
-struct AxSpawn { void* (*fn)(void*); void* arg; std::atomic<int>* err; size_t bs; int dna; };
+struct AxSpawn { void* (*fn)(void*); void* arg; std::atomic<int>* err; size_t bs; int dna, lvl; };
 static void* ax_tramp(void* p){ AxSpawn s=*(AxSpawn*)p; delete (AxSpawn*)p;
-    t_dec_err=s.err; g_block_size=s.bs; g_input_is_dna=s.dna; return s.fn(s.arg); }
+    t_dec_err=s.err; g_block_size=s.bs; g_input_is_dna=s.dna; g_enc_level=s.lvl; return s.fn(s.arg); }
 static std::atomic<long> g_ax_spawned{0};             // threads started by the codec (claim head_enc_threads)
 static int ax_thread(pthread_t* t, void* (*fn)(void*), void* arg){
     g_ax_spawned.fetch_add(1);
-    return pthread_create(t,nullptr,ax_tramp,new AxSpawn{fn,arg,&ax_dec_err(),g_block_size,g_input_is_dna}); }
+    return pthread_create(t,nullptr,ax_tramp,new AxSpawn{fn,arg,&ax_dec_err(),g_block_size,g_input_is_dna,g_enc_level}); }
 // Encoder thread budget of the current call (2.2.1): encode_file sets it from its `threads`; the entropy
 // stage (literal lanes, the three token streams) keeps to it. Before 2.2.1 that stage started up to
 // 3 + CPU-count threads whatever the budget (lzbench -I1: 146 % CPU). 0 = not set (no cap).
@@ -1024,7 +1028,13 @@ static inline void ax_block_out(uint8_t* dst, size_t bstart, size_t bsize, const
 static void* dec_worker(void* arg) {
     DecArgs* a = (DecArgs*)arg;
     std::vector<uint8_t> nbuf;
+#ifdef ACEAPEX_ENV_TUNING
+    // AX_LINEMODEL's sink takes every block: chunked literals above the tile limit (W5's 1 MiB chunks, or LIT_CHUNK
+    // >= 512 KiB) decode here, not on the tile path, and the direct loop below wrote them to dst + bstart
+    if (a->nt || g_ax_out_sink) {
+#else
     if (a->nt) {
+#endif
         for (size_t b = a->bid_start; b < a->bid_end; b++) {
             const BlockOffsets& bo = a->boffs[b]; const size_t bstart = b * a->block_size;
             const size_t bsize = a->dst_size > bstart ? std::min<size_t>((size_t)a->block_size, a->dst_size - bstart) : 0;
@@ -1082,6 +1092,7 @@ static bool encode_file(const uint8_t* src, size_t src_size, int threads, int le
 {
     g_enc_threads = threads > 0 ? threads : 1;              // entropy stage keeps to this (2.2.1)
     g_block_size = compute_block_size(src_size, threads);
+    g_enc_level = level;                                    // lit_chunk_size(): W5 only for levels 1-2 (2.6.2)
     // Подсказка для lit_chunk_size(): проверяем сам вход, не литералы.
     if(!ax_getenv("LIT_CHUNK"))
         g_input_is_dna = dna_worth(src, src_size < (1u<<22) ? src_size : (1u<<22)) ? 1 : -1;
@@ -1486,6 +1497,10 @@ static uint8_t* lit_compress_legacy(const uint8_t* src, size_t sz, size_t& out_s
 // Выставляется один раз в encode_file по выборке из входа.
 // 0 = не проверяли, 1 = входные данные проходят dna_worth, -1 = нет.
 thread_local int g_input_is_dna = 0;
+// Level of the encode_file call on this thread (2.6.2): non-DNA literals of levels 1-2 go in 1 MiB chunks, which the
+// decoder reads in parallel (W5: decode -I8 x1.19-1.24 on Zen 4 and Zen 5 at +0.40..+0.63 % size, results/w5-2026-11-12.txt);
+// levels 3-4 keep the 4-part layout (level 3: +1.35..+1.67 % size, speed not measured).
+thread_local int g_enc_level = 0;
 
 static size_t lit_chunk_size(){
     const char* e=ax_getenv("LIT_CHUNK");
@@ -1500,7 +1515,8 @@ static size_t lit_chunk_size(){
     // для регионального доступа чанкование обязательно на любых данных
     // (без него seek 46 мс против 0.082).
     // the open literal profile has no 4-part zstd layout: it always writes tagged chunks
-    return (g_input_is_dna == 1 || ax_lit_open()) ? 65536 : 0;
+    if (g_input_is_dna == 1 || ax_lit_open()) return 65536;
+    return g_input_is_dna == -1 && (g_enc_level == 1 || g_enc_level == 2) ? 1048576 : 0;
 }
 #define LIT_CHUNK lit_chunk_size()
 
@@ -1919,7 +1935,8 @@ static int do_compress(const char* in_path, const char* out_path, int threads, i
     fseek(fin_w,0,SEEK_END); size_t src_size=(size_t)ftell(fin_w); fseek(fin_w,0,SEEK_SET);
     uint8_t* src=(uint8_t*)malloc(src_size);
     if(!src){fprintf(stderr,"malloc failed\n");fclose(fin_w);return 1;}
-    fread(src,1,src_size,fin_w); fclose(fin_w);
+    if(fread(src,1,src_size,fin_w)!=src_size){fprintf(stderr,"Cannot read: %s\n",in_path);free(src);fclose(fin_w);return 1;}
+    fclose(fin_w);
     bool src_is_mmap=false;
 #else
     int fin_fd=open(in_path,O_RDONLY);
@@ -2067,13 +2084,42 @@ static int do_decompress_stream(const char* in_path, int threads) {
     fprintf(stderr, "  Stream: %lld bytes to stdout in %.3f s (%.2f GB/s), hash OK\n", (long long)n, now_sec() - t0, (double)n / (now_sec() - t0) / 1e9);
     return 0;
 }
-static int do_decompress(const char* in_path, const char* out_path, int threads=8) {
+static int do_decompress(const char* in_path, const char* out_path, int threads=8);
+// `d --out FILE` (FREEZE-4): the original goes to a temporary file next to FILE and is renamed to FILE only when the
+// decode succeeded and its XXH3 matches the header (every do_decompress path returns 0 only then); otherwise the
+// temporary file is removed, FILE is not created (an existing FILE is left as it was) and the exit status is 1. A FILE
+// that exists and is not a regular file (/dev/null, a FIFO, /dev/stdout) is written directly, as before.
+#if !defined(ACEAPEX_NO_MAIN) || defined(ACEAPEX_CLI)
+static int ax_cli_decompress_file(const char* in_path, const char* out_path, int threads) {
+#ifndef _WIN32
+    struct stat st;
+    if (::stat(out_path, &st) == 0 && !S_ISREG(st.st_mode)) return do_decompress(in_path, out_path, threads);
+    const long pid = (long)getpid();
+#else
+    const long pid = (long)_getpid();
+#endif
+    char tmp[4096];
+    if (snprintf(tmp, sizeof tmp, "%s.aceapex-tmp.%ld", out_path, pid) >= (int)sizeof tmp) { fprintf(stderr,"Output path too long: %s\n",out_path); return 1; }
+    const int rc = do_decompress(in_path, tmp, threads);
+    if (rc == 0) {
+#ifdef _WIN32
+        remove(out_path);                                    // rename() does not replace an existing file there
+#endif
+        if (rename(tmp, out_path) == 0) return 0;
+        fprintf(stderr,"Cannot rename %s to %s: %s\n", tmp, out_path, strerror(errno));
+    }
+    remove(tmp);
+    fprintf(stderr,"  %s not written (decode failed or XXH3 mismatch)\n", out_path);
+    return 1;
+}
+#endif
+static int do_decompress(const char* in_path, const char* out_path, int threads) {
     g_dec_err=0;
     double t_wall=now_sec();
     FILE* fin=fopen(in_path,"rb");
     if (!fin) { fprintf(stderr,"Cannot open: %s\n",in_path); return 1; }
     AetHeader hdr;
-    fread(&hdr,sizeof(hdr),1,fin);
+    if (fread(&hdr,sizeof(hdr),1,fin)!=1) { fprintf(stderr,"Cannot read: %s (shorter than the header)\n",in_path); fclose(fin); return 1; }
 #ifdef ACEAPEX_ENV_TUNING
     if (!memcmp(hdr.magic, "AXLINE01", 8)) { fclose(fin); return ax_cli_lm_decompress(in_path, out_path, threads); }
 #endif
@@ -2116,15 +2162,16 @@ static int do_decompress(const char* in_path, const char* out_path, int threads=
 
     uint32_t nb=hdr.num_blocks;
     std::vector<BlockOffsets> boffs(nb);
-    fread(boffs.data(),sizeof(BlockOffsets),nb,fin);
+    if (fread(boffs.data(),sizeof(BlockOffsets),nb,fin)!=nb) { fprintf(stderr,"Cannot read: %s (block table)\n",in_path); fclose(fin); return 1; }
  
     uint8_t* zlit=(uint8_t*)malloc(hdr.zlit_sz);
     uint8_t* zoff=(uint8_t*)malloc(hdr.zoff_sz);
     uint8_t* zlen=(uint8_t*)malloc(hdr.zlen_sz);
     uint8_t* zcmd=(uint8_t*)malloc(hdr.zcmd_sz);
     if(!zlit||!zoff||!zlen||!zcmd){free(zlit);free(zoff);free(zlen);free(zcmd);fclose(fin);return 1;}
-    fread(zlit,1,hdr.zlit_sz,fin); fread(zoff,1,hdr.zoff_sz,fin);
-    fread(zlen,1,hdr.zlen_sz,fin); fread(zcmd,1,hdr.zcmd_sz,fin);
+    if (fread(zlit,1,hdr.zlit_sz,fin)!=hdr.zlit_sz || fread(zoff,1,hdr.zoff_sz,fin)!=hdr.zoff_sz ||
+        fread(zlen,1,hdr.zlen_sz,fin)!=hdr.zlen_sz || fread(zcmd,1,hdr.zcmd_sz,fin)!=hdr.zcmd_sz) {
+        fprintf(stderr,"Cannot read: %s (streams)\n",in_path); free(zlit);free(zoff);free(zlen);free(zcmd); fclose(fin); return 1; }
     fclose(fin);
  
     // Stream headers come from the file: a corrupted length would malloc() garbage.
@@ -2226,7 +2273,8 @@ static int do_test(const char* in_path, int threads, int level=2) {
     fseek(fin,0,SEEK_END); size_t src_size=(size_t)ftell(fin); fseek(fin,0,SEEK_SET);
     uint8_t* src=(uint8_t*)malloc(src_size);
     if(!src){fclose(fin);return 1;}
-    fread(src,1,src_size,fin); fclose(fin);
+    if(fread(src,1,src_size,fin)!=src_size){fprintf(stderr,"Cannot read: %s\n",in_path);free(src);fclose(fin);return 1;}
+    fclose(fin);
     fprintf(stderr,"[*] Test: %s (%.2f MB) threads=%d\n",in_path,src_size/1e6,threads);
     double t_total_t=now_sec();
     if (ax_fast_level(level)) {                       // fast profile: encode to memory, decode, compare
@@ -2461,7 +2509,7 @@ int main(int argc, char** argv) {
     if ((!strcmp(cmd,"c") || !strcmp(cmd,"d")) && ax_cli_stdin(in)) return 1;
 #endif
     if (!strcmp(cmd,"c")) { if (!out) { fprintf(stderr,"--out required\n"); return 1; } return do_compress(in,out,thr,level); }
-    if (!strcmp(cmd,"d")) { if (!out) { fprintf(stderr,"--out required (or - for stdout)\n"); return 1; } return strcmp(out,"-") ? do_decompress(in,out,thr) : do_decompress_stream(in,thr); }
+    if (!strcmp(cmd,"d")) { if (!out) { fprintf(stderr,"--out required (or - for stdout)\n"); return 1; } return strcmp(out,"-") ? ax_cli_decompress_file(in,out,thr) : do_decompress_stream(in,thr); }
     if (!strcmp(cmd,"t")) return do_test(in,thr,level);
     if (!strcmp(cmd,"r")) {
         if (!out) { fprintf(stderr,"--out required\n"); return 1; }
